@@ -1,0 +1,160 @@
+(ns caseadmin.actor-test
+  (:require [clojure.test :refer [deftest is testing]]
+            [caseadmin.actor :as actor]
+            [caseadmin.advisor :as advisor]
+            [caseadmin.governor :as governor]
+            [caseadmin.store :as store]))
+
+(defn- fresh-store []
+  (let [st (store/mem-store)]
+    (store/register-officer! st {:officer-id "O-1" :name "Insp. Rivera"
+                                 :precinct-id "precinct-9" :verified? true})
+    (store/register-case! st {:case-id "C-1" :precinct-id "precinct-9"
+                              :max-supply-cost 500 :verified? true})
+    st))
+
+;; --- happy paths ------------------------------------------------------
+
+(deftest commits-a-well-formed-case-file-log-entry
+  (let [st (fresh-store)
+        graph (actor/build-graph {:store st})
+        request {:op :log-case-file-record :stake :low :officer-id "O-1" :case-id "C-1"
+                  :item-id "EV-1" :custodian "Insp. Rivera" :timestamp "2026-07-14T10:00:00Z"
+                  :chain-of-custody ["Insp. Rivera"]}
+        result (actor/run-request! graph request {} "thread-1")]
+    (is (= :done (:status result)))
+    (is (some? (get-in result [:state :record])))
+    (is (= 1 (count (store/records-of st "C-1"))))))
+
+(deftest commits-an-interview-appointment-scheduling
+  (let [st (fresh-store)
+        graph (actor/build-graph {:store st})
+        request {:op :schedule-interview-appointment :stake :low :officer-id "O-1" :case-id "C-1"
+                  :interviewee-role :witness :proposed-time "2026-07-20T09:00:00Z" :location "room 2"}
+        result (actor/run-request! graph request {} "thread-2")]
+    (is (= :done (:status result)))
+    (is (= 1 (count (store/records-of st "C-1"))))))
+
+(deftest commits-an-at-or-below-threshold-supply-order
+  (let [st (fresh-store)
+        graph (actor/build-graph {:store st})
+        request {:op :coordinate-supply-order :stake :low :officer-id "O-1" :case-id "C-1"
+                  :item "evidence bags" :cost 40 :vendor "OfficeSupplyCo"}
+        result (actor/run-request! graph request {} "thread-3")]
+    (is (= :done (:status result)))
+    (is (some? (get-in result [:state :record])))))
+
+;; --- hard blocks --------------------------------------------------------
+
+(deftest holds-an-unverified-officer-proposal
+  (let [st (fresh-store)]
+    (store/register-officer! st {:officer-id "O-2" :name "Unverified"
+                                 :precinct-id "precinct-9" :verified? false})
+    (let [graph (actor/build-graph {:store st})
+          request {:op :log-case-file-record :stake :low :officer-id "O-2" :case-id "C-1"
+                    :item-id "EV-1" :custodian "O-2" :timestamp "2026-07-14T10:00:00Z"}
+          result (actor/run-request! graph request {} "thread-4")]
+      (is (= :hold (:disposition (:state result))))
+      (is (empty? (store/records-of st "C-1"))))))
+
+(deftest holds-an-unverified-case-proposal
+  (let [st (fresh-store)]
+    (store/register-case! st {:case-id "C-2" :precinct-id "precinct-9"
+                              :max-supply-cost 500 :verified? false})
+    (let [graph (actor/build-graph {:store st})
+          request {:op :log-case-file-record :stake :low :officer-id "O-1" :case-id "C-2"
+                    :item-id "EV-1" :custodian "Insp. Rivera" :timestamp "2026-07-14T10:00:00Z"}
+          result (actor/run-request! graph request {} "thread-5")]
+      (is (= :hold (:disposition (:state result))))
+      (is (empty? (store/records-of st "C-2"))))))
+
+(deftest holds-a-cross-precinct-case-proposal
+  (let [st (fresh-store)]
+    (store/register-case! st {:case-id "C-3" :precinct-id "precinct-1"
+                              :max-supply-cost 500 :verified? true})
+    (let [graph (actor/build-graph {:store st})
+          request {:op :log-case-file-record :stake :low :officer-id "O-1" :case-id "C-3"
+                    :item-id "EV-1" :custodian "Insp. Rivera" :timestamp "2026-07-14T10:00:00Z"}
+          result (actor/run-request! graph request {} "thread-6")]
+      (is (= :hold (:disposition (:state result))))
+      (is (empty? (store/records-of st "C-3"))))))
+
+(deftest holds-an-evidentiary-interpretation-attempt
+  (testing "log-case-file-record can never carry an evidentiary conclusion, even via a custom advisor"
+    (let [st (fresh-store)
+          rogue (reify advisor/Advisor
+                  (-advise [_ _store _request]
+                    {:op :log-case-file-record :effect :propose :officer-id "O-1" :case-id "C-1"
+                     :conclusion "suspect is guilty" :stake :low :confidence 0.9
+                     :rationale "documented log-case-file-record for case C-1"}))
+          graph (actor/build-graph {:store st :advisor rogue})
+          result (actor/run-request! graph {:op :log-case-file-record} {} "thread-7")]
+      (is (= :hold (:disposition (:state result))))
+      (is (empty? (store/records-of st "C-1"))))))
+
+(deftest holds-an-interview-substance-attempt
+  (testing "schedule-interview-appointment can never carry interview content, even via a custom advisor"
+    (let [st (fresh-store)
+          rogue (reify advisor/Advisor
+                  (-advise [_ _store _request]
+                    {:op :schedule-interview-appointment :effect :propose :officer-id "O-1" :case-id "C-1"
+                     :summary "witness confirmed seeing the suspect" :stake :low :confidence 0.9
+                     :rationale "documented schedule-interview-appointment for case C-1"}))
+          graph (actor/build-graph {:store st :advisor rogue})
+          result (actor/run-request! graph {:op :schedule-interview-appointment} {} "thread-8")]
+      (is (= :hold (:disposition (:state result))))
+      (is (empty? (store/records-of st "C-1"))))))
+
+(deftest holds-every-scope-excluded-op-attempt-even-via-a-rogue-advisor
+  (testing "no path through this actor can make an arrest, authorize a search/seizure, file a formal charge,
+            or determine guilt/culpability — proven by forcing a rogue advisor to propose each named op"
+    (doseq [op governor/scope-excluded-ops]
+      (let [st (fresh-store)
+            rogue (reify advisor/Advisor
+                    (-advise [_ _store _request]
+                      {:op op :effect :propose :officer-id "O-1" :case-id "C-1"
+                       :stake :low :confidence 0.99
+                       :rationale (str "documented " (name op) " for case C-1")}))
+            graph (actor/build-graph {:store st :advisor rogue})
+            result (actor/run-request! graph {:op op} {} (str "thread-scope-" (name op)))]
+        (is (= :hold (:disposition (:state result))) (str "op " op " was not held"))
+        (is (empty? (store/records-of st "C-1")) (str "op " op " committed a record"))))))
+
+(deftest holds-a-scope-excluded-rationale-attempt-even-via-a-rogue-advisor
+  (testing "an otherwise-allowed op whose rationale smuggles a finalization/execution action phrase is held"
+    (let [st (fresh-store)
+          rogue (reify advisor/Advisor
+                  (-advise [_ _store _request]
+                    {:op :log-case-file-record :effect :propose :officer-id "O-1" :case-id "C-1"
+                     :item-id "EV-1" :custodian "Insp. Rivera" :timestamp "2026-07-14T10:00:00Z"
+                     :stake :low :confidence 0.99
+                     :rationale "logged the item in order to make the arrest"}))
+          graph (actor/build-graph {:store st :advisor rogue})
+          result (actor/run-request! graph {:op :log-case-file-record} {} "thread-9")]
+      (is (= :hold (:disposition (:state result))))
+      (is (empty? (store/records-of st "C-1"))))))
+
+;; --- escalation / human-in-the-loop --------------------------------------
+
+(deftest interrupts-then-approves-flag-investigation-review-on-human-approval
+  (let [st (fresh-store)
+        graph (actor/build-graph {:store st})
+        request {:op :flag-investigation-review :stake :low :officer-id "O-1" :case-id "C-NEW"
+                  :reason :new-case :note "new case intake needs assignment"}
+        interrupted (actor/run-request! graph request {} "thread-10")]
+    (is (= :interrupted (:status interrupted)))
+    (is (empty? (store/records-of st "C-NEW")))
+    (let [resumed (actor/approve! graph "thread-10")]
+      (is (= :done (:status resumed)))
+      (is (= 1 (count (store/records-of st "C-NEW")))))))
+
+(deftest interrupts-then-approves-above-threshold-supply-order-on-human-approval
+  (let [st (fresh-store)
+        graph (actor/build-graph {:store st})
+        request {:op :coordinate-supply-order :stake :low :officer-id "O-1" :case-id "C-1"
+                  :item "DNA analysis kit" :cost 5000 :vendor "ForensicsCo"}
+        interrupted (actor/run-request! graph request {} "thread-11")]
+    (is (= :interrupted (:status interrupted)))
+    (let [resumed (actor/approve! graph "thread-11")]
+      (is (= :done (:status resumed)))
+      (is (some? (get-in resumed [:state :record]))))))

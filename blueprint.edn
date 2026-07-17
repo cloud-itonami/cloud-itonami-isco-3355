@@ -1,0 +1,11 @@
+[{:itonami.blueprint/social-impact [:due-process-integrity :evidence-chain-of-custody-integrity :case-backlog-reduction]
+  :itonami.blueprint/domain :public-safety/case-file-documentation-and-logistics-coordination
+  :itonami.blueprint/required-technologies [:robotics :identity :audit-ledger]
+  :itonami.blueprint/isco-08 "3355"
+  :itonami.blueprint/name "Police Case-File Documentation and Administrative-Logistics Coordination Practice"
+  :itonami.blueprint/governor :caseadmin-governor
+  :itonami.blueprint/robotics true
+  :db/id -1
+  :itonami.blueprint/status :public-oss
+  :itonami.blueprint/id "cloud-itonami-isco-3355"
+  :itonami.blueprint/license "AGPL-3.0-or-later"}]

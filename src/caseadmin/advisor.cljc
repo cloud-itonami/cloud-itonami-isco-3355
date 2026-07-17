@@ -1,0 +1,117 @@
+(ns caseadmin.advisor
+  "Case File Advisor — the advisor named in this repository's README,
+  proposing a case-file documentation/administrative-logistics
+  operation (log a chain-of-custody entry, schedule an interview
+  appointment, flag a case file for human detective/inspector review,
+  or coordinate a forensic/office-equipment supply order) from an
+  officer's intake queue, case-file directory and supply policy.
+  Swappable mock/llm; the advisor ONLY proposes —
+  `caseadmin.governor` checks officer/case verification and scope
+  independently and always escalates investigation-review flags and
+  above-threshold supply orders. Modeled on cloud-itonami-isco-3353's
+  advisor.
+
+  This advisor NEVER proposes making an arrest, authorizing a
+  search/seizure, filing a formal charge, or determining a suspect's
+  guilt or culpability — no such op exists anywhere in the closed
+  allowlist below (`caseadmin.governor/closed-op-allowlist`), and the
+  rationale text this advisor emits never uses a finalization/
+  execution phrase for any of those actions
+  (`caseadmin.governor/scope-excluded-terms`), so the advisor's own
+  DEFAULT proposals never self-trip the governor's scope-exclusion
+  check (see `caseadmin.governor-test/
+  default-mock-advisor-proposals-never-self-trip-scope-exclusion`).
+  Any observation suggesting a case needs human attention is surfaced
+  ONLY via `:flag-investigation-review`, which always escalates to a
+  human detective/inspector and never auto-commits — the robot's role
+  ends at \"here is an organized case file\", never \"here is what I
+  think happened\" or \"here is who did it\".
+
+  A proposal:
+  {:op :log-case-file-record|:schedule-interview-appointment|
+       :flag-investigation-review|:coordinate-supply-order
+   :effect :propose :officer-id str :case-id (str or nil, only nil
+   for :flag-investigation-review) :stake kw :confidence n
+   :rationale str, plus op-specific fields (:item-id/:custodian/
+   :chain-of-custody/:timestamp for log-case-file-record;
+   :interviewee-role/:proposed-time/:location for
+   schedule-interview-appointment; :reason/:note for
+   flag-investigation-review; :item/:cost/:vendor for
+   coordinate-supply-order)}"
+  (:require [clojure.edn :as edn]))
+
+(defprotocol Advisor
+  (-advise [advisor store request] "request -> proposal map"))
+
+(defn- rationale-for [op case-id]
+  (str "documented " (name op)
+       (if case-id (str " for case " case-id) " (no case yet — new-case intake)")))
+
+(defn- infer [_store {:keys [op stake officer-id case-id] :as request}]
+  (let [base {:op op
+              :effect :propose
+              :officer-id officer-id
+              :case-id case-id
+              :stake (or stake :low)
+              :confidence (case (or stake :low) :high 0.7 :medium 0.85 :low 0.95)
+              :rationale (rationale-for op case-id)}]
+    (merge base
+           (case op
+             :log-case-file-record
+             (select-keys request [:item-id :custodian :chain-of-custody :timestamp])
+             :schedule-interview-appointment
+             (select-keys request [:interviewee-role :proposed-time :location])
+             :flag-investigation-review
+             (select-keys request [:reason :note])
+             :coordinate-supply-order
+             (select-keys request [:item :cost :vendor])
+             {}))))
+
+(defn mock-advisor []
+  (reify Advisor
+    (-advise [_ store request] (infer store request))))
+
+(def ^:private system-prompt
+  "You are a case-file documentation and administrative-logistics
+   coordination advisor for a police detective/inspector unit. Given a
+   request, propose an :op, the :officer-id and (when relevant)
+   :case-id plus the op's own fields, an honest :confidence and a
+   :stake. You are a documentation and logistics-coordination robot
+   ONLY — you help log chain-of-custody entries, schedule interview
+   appointments, and coordinate forensic/office supply orders. Never
+   propose an op outside the closed four-op allowlist
+   (:log-case-file-record, :schedule-interview-appointment,
+   :flag-investigation-review, :coordinate-supply-order), and NEVER
+   propose making an arrest, authorizing a search or seizure, filing a
+   formal charge, or determining a suspect's guilt or culpability —
+   that authority does not exist for you, under any circumstance, at
+   any confidence level. A :log-case-file-record entry is a physical
+   handling log only, never an evidentiary interpretation. A
+   :schedule-interview-appointment proposal is scheduling logistics
+   only — never conduct or summarize the interview's substance. Any
+   indication that a case needs human detective/inspector attention
+   must be surfaced only via :flag-investigation-review, which always
+   requires human review regardless of confidence. The governor
+   independently verifies officer/case registration and always
+   escalates investigation-review flags and above-threshold supply
+   orders to a human.")
+
+(defn- parse-proposal [content]
+  (try
+    (let [p (edn/read-string content)]
+      (if (map? p)
+        (assoc p :effect :propose)
+        {:op :unknown :effect :propose :confidence 0.0 :stake :high
+         :rationale "unparseable LLM response"}))
+    (catch #?(:clj Exception :cljs js/Error) _
+      {:op :unknown :effect :propose :confidence 0.0 :stake :high
+       :rationale "LLM response parse failure"})))
+
+(defn llm-advisor
+  [chat-model model-generate-fn gen-opts]
+  (reify Advisor
+    (-advise [_ _store request]
+      (let [msgs [{:role :system :content system-prompt}
+                  {:role :user :content (str "operation request: " (pr-str request))}]
+            resp (model-generate-fn chat-model msgs gen-opts)]
+        (parse-proposal (:content resp))))))
