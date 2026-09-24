@@ -1,5 +1,5 @@
 (ns caseadmin.governor-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [caseadmin.store :as store]
             [caseadmin.advisor :as advisor]
             [caseadmin.governor :as governor]))
