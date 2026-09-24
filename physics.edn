@@ -1,0 +1,34 @@
+;; What this vertical's robot physically does, declared for
+;; kotoba.robotics.process (kotoba-lang/robotics). `kbb -M:physics` runs it.
+;;
+;; README "Robotics premise": a case-file intake and logistics robot performs
+;; evidence-log data entry, interview-appointment scheduling and
+;; forensic/office-supply coordination for police inspectors and detectives
+;; (ISCO 3355). It never arrests, searches, charges or judges guilt. Its
+;; physical work is moving case material: lifting boxed case files onto
+;; storage shelving and pushing a stacked supply cart through the station.
+;;
+;; Every number without a cited source is marked `estimate` in its :basis.
+;; Replacing an estimate with a sourced value is this bot's growth work.
+{:physics/schema "itonami.physical-ai.spec.v1"
+ :repo "cloud-itonami/cloud-itonami-isco-3355"
+ :cases
+ [{:id :case-file-box-to-shelf
+   :kind :manipulator
+   :procedure "arm lifts a boxed case file from the intake bench onto a case-storage shelf"
+   :params {:l1-m 0.60 :l2-m 0.55 :m1-kg 8.0 :m2-kg 6.0
+            :from [0.70 0.10] :to [0.30 0.80] :duration-s 3.0 :steps 600}
+   :sweep {:param :payload-kg :values [1.0 3.0 6.0 10.0 15.0]}
+   :quantity :peak-tau1-nm
+   :limit {:max 150.0 :basis "estimate: continuous shoulder torque of a ~10 kg-class collaborative arm"}
+   :boundary {:lo 0.1 :hi 40.0}}
+  {:id :supply-cart-stack-height
+   :kind :transport
+   :procedure "robot pushes a cart of forensic and office supplies down the station corridor and stops for a door; the stack height sets the centre of gravity"
+   :params {:mass-kg 50.0 :payload-kg 25.0 :distance-m 30.0 :v-max-mps 1.0 :a-max-mps2 0.5
+            :brake-decel-mps2 1.5 :drive-force-n 150.0 :crr 0.02
+            :support-half-length-m 0.20}
+   :sweep {:param :cog-height-m :values [0.4 0.6 0.8 1.0 1.2]}
+   :quantity :min-tipover-margin
+   :limit {:min 0.3 :basis "estimate: keep 30% of the static tip-over moment in reserve for floor bumps and uneven loading"}
+   :boundary {:lo 0.2 :hi 2.0}}]}
